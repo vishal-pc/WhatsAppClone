@@ -1,0 +1,6 @@
+node_modules/
+dist/*
+redis_data/
+logs/*
+.env
+package-lock.json
