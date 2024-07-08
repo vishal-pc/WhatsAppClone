@@ -28,6 +28,7 @@ export const SuccessMessages = {
   ChangePasswordSuccess: "Password changed successfully",
   UserUpdatedSuccess: "User updated successfully",
   DataFound: "Data found",
+  Logout: "User logged out",
 };
 
 export const ErrorMessages = {
@@ -61,4 +62,5 @@ export const ErrorMessages = {
   ResetPasswordsError: "Faild to reset password",
   PasswordSameError: "Confirm password and password must be the same",
   DataError: "Data not found",
+  IdNotFound: "Request id not found",
 };

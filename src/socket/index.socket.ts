@@ -12,6 +12,7 @@ import { updateUserDataInDatabase } from "../controller/user.controller";
 
 dotenv.config();
 
+export const jwtSecret = process.env.Jwt_Secret || "defaultSecreteKey";
 export const storeUserSocketId = async (
   userId: string,
   socketId: string
@@ -29,7 +30,7 @@ export const authorizeJWT = async (token: string) => {
   const authHeader = token;
   if (authHeader) {
     const token = authHeader;
-    const decoded: any = jwt.verify(token, `${process.env.Jwt_Secret}`);
+    const decoded: any = jwt.verify(token, jwtSecret);
     if (decoded?.id) {
       return decoded;
     } else {
@@ -241,42 +242,42 @@ export function initializeWebSocket(server: http.Server) {
       await sendOnlineEvent(data?.userId);
     });
 
-    // socket.on(
-    //   "blockOtherUser",
-    //   async (data: {
-    //     otherUserId: string;
-    //     conversation_id: string;
-    //     user_id: string;
-    //   }) => {
-    //     if (data?.conversation_id) {
-    //       const Other_user_scoket_id = await getUserSocketId(data.otherUserId);
-    //       // console.log("OpenApp");
-    //       socket.to(Other_user_scoket_id).emit("GotBlocked", {
-    //         conversation_id: data.conversation_id,
-    //         user_id: data.user_id,
-    //       });
-    //     }
-    //   }
-    // );
+    socket.on(
+      "blockOtherUser",
+      async (data: {
+        otherUserId: string;
+        conversation_id: string;
+        user_id: string;
+      }) => {
+        if (data?.conversation_id) {
+          const Other_user_scoket_id = await getUserSocketId(data.otherUserId);
+          // console.log("OpenApp");
+          socket.to(Other_user_scoket_id).emit("GotBlocked", {
+            conversation_id: data.conversation_id,
+            user_id: data.user_id,
+          });
+        }
+      }
+    );
 
-    // socket.on(
-    //   "UnblockOtherUser",
-    //   async (data: {
-    //     otherUserId: string;
-    //     conversation_id: string;
-    //     user_id: string;
-    //   }) => {
-    //     if (data?.conversation_id) {
-    //       const Other_user_scoket_id = await getUserSocketId(data.otherUserId);
-    //       // console.log("OpenApp");
-    //       socket.to(Other_user_scoket_id).emit("GotUnBlocked", {
-    //         conversation_id: data.conversation_id,
-    //         user_id: data.user_id,
-    //         // answers: nextQuestionForSender?.currentQuestion?.answers,
-    //       });
-    //     }
-    //   }
-    // );
+    socket.on(
+      "UnblockOtherUser",
+      async (data: {
+        otherUserId: string;
+        conversation_id: string;
+        user_id: string;
+      }) => {
+        if (data?.conversation_id) {
+          const Other_user_scoket_id = await getUserSocketId(data.otherUserId);
+          // console.log("OpenApp");
+          socket.to(Other_user_scoket_id).emit("GotUnBlocked", {
+            conversation_id: data.conversation_id,
+            user_id: data.user_id,
+            // answers: nextQuestionForSender?.currentQuestion?.answers,
+          });
+        }
+      }
+    );
 
     // Private message to a user Starts
     socket.on(
@@ -1093,18 +1094,18 @@ const sendLatednumberMessage = async (
   };
 };
 
-// export const SendUnblockedEvent = async (
-//   conversation_id: any,
-//   user_id: any,
-//   otherUserId: any
-// ) => {
-//   // console.log("conversation_id", conversation_id);
-//   const otherParticipantSocketId = await getUserSocketId(otherUserId);
-//   io.to(otherParticipantSocketId).emit("GotUnBlocked", {
-//     conversation_id: conversation_id,
-//     user_id: user_id,
-//   });
-// };
+export const SendUnblockedEvent = async (
+  conversation_id: any,
+  user_id: any,
+  otherUserId: any
+) => {
+  // console.log("conversation_id", conversation_id);
+  const otherParticipantSocketId = await getUserSocketId(otherUserId);
+  io.to(otherParticipantSocketId).emit("GotUnBlocked", {
+    conversation_id: conversation_id,
+    user_id: user_id,
+  });
+};
 
 const getLatestmessages = async (
   conversation_id: string,

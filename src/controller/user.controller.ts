@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import bcrypt from "bcryptjs";
-import User from "../models/user.model";
+import jwt from "jsonwebtoken";
+import User, { IUser } from "../models/user.model";
 import {
   ErrorMessages,
   StatusCodes,
@@ -11,11 +12,19 @@ import {
   passwordRegex,
   validateMobileNumber,
 } from "../helper/helper";
-
 import { transporter } from "../middleware/mail/transPorter";
 import { sendMailForPassword } from "../template/forgetPassMail";
 import cloudinary from "../middleware/cloudflare/cloudinary";
-import { CustomRequest, userType } from "../middleware/token/authMiddleware";
+import redisClient from "../helper/radis/index.redis";
+import mongoose from "mongoose";
+import UserFCM from "../models/userfcm.model";
+import { getUserSocketId, sendOfflineEvent } from "../socket/index.socket";
+
+async function removeToken(userId: string) {
+  await redisClient.del(`user_${userId}`);
+}
+
+const otpStore: any = {};
 
 // User Register
 export const userRegister = async (req: Request, res: Response) => {
@@ -93,45 +102,62 @@ export const userRegister = async (req: Request, res: Response) => {
   }
 };
 
-// Get user user By id
-export const getUserById = async (req: CustomRequest, res: Response) => {
+// User Login
+export const userLogin = async (req: Request, res: Response) => {
+  const { email, password } = req.body;
   try {
-    const tokenuser = req.user as userType;
-    if (!tokenuser) {
+    const requiredFields = ["email", "password"];
+    const missingFields = requiredFields.filter((field) => !req.body[field]);
+
+    if (missingFields.length > 0) {
+      const missingFieldsMessage = missingFields.join(", ");
+      return res.json({
+        message: ErrorMessages.MissingFields(missingFieldsMessage),
+        success: false,
+        status: StatusCodes.ClientError.BadRequest,
+      });
+    }
+    const auth = await User.findOne({ email });
+    if (!auth) {
       return res.json({
         message: ErrorMessages.UserNotFound,
         success: false,
         status: StatusCodes.ClientError.NotFound,
       });
     }
-    const userId = tokenuser.userId;
-    const foundedUser = await User.findById({ _id: userId });
-    if (!foundedUser) {
+
+    const isPasswordValid = await bcrypt.compare(password, auth.password || "");
+    if (!isPasswordValid) {
       return res.json({
-        message: ErrorMessages.UserNotFound,
+        message: ErrorMessages.IncorrectCredentials,
         success: false,
-        status: StatusCodes.ClientError.NotFound,
+        status: StatusCodes.ClientError.BadRequest,
       });
     }
-    const userData = {
-      _id: foundedUser.id,
-      fullName: foundedUser.fullName,
-      email: foundedUser.email,
-      mobileNumber: foundedUser.mobileNumber || "null",
-      profileImg: foundedUser.profileImg || "null",
-      address: foundedUser.address || "null",
-      role: foundedUser.role,
-      createdAt: foundedUser.createdAt,
-      updatedAt: foundedUser.updatedAt,
-    };
+    await User.findByIdAndUpdate(auth._id, { userLogin: true }, { new: true });
+    const updatedAuth = await User.findById(auth._id);
+    const jwtSecret = process.env.Jwt_Secret || "defaultSecreteKey";
+
+    const token = jwt.sign(
+      {
+        userId: updatedAuth?._id,
+        fullName: updatedAuth?.fullName,
+        email: updatedAuth?.email,
+        userLogin: updatedAuth?.userLogin,
+      },
+      jwtSecret,
+      { expiresIn: process.env.Jwt_Expiry_Hours }
+    );
+    await redisClient.set(`user_${updatedAuth?._id}`, token);
     return res.json({
-      message: SuccessMessages.UserFound,
+      message: SuccessMessages.SignInSuccess,
       status: StatusCodes.Success.Ok,
       success: true,
-      userData,
+      token,
+      user: updatedAuth,
     });
   } catch (error) {
-    console.error("Error in getting user by id", error);
+    console.error("Error in user login", error);
     return res.json({
       message: ErrorMessages.SomethingWentWrong,
       success: false,
@@ -140,7 +166,127 @@ export const getUserById = async (req: CustomRequest, res: Response) => {
   }
 };
 
-const otpStore: any = {};
+// Get user user By id
+export const getUserById = async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+    const foundedUser = await User.findById({ _id: id });
+    if (!foundedUser) {
+      return res.status(StatusCodes.ClientError.NotFound).json({
+        message: ErrorMessages.UserNotFound,
+        success: false,
+      });
+    }
+    const userData = {
+      _id: foundedUser.id,
+      fullName: foundedUser.fullName,
+      email: foundedUser.email,
+      mobileNumber: foundedUser.mobileNumber || "null",
+      // profileImg: foundedUser.profileImg || "null",
+      createdAt: foundedUser.createdAt,
+      updatedAt: foundedUser.updatedAt,
+    };
+    return res.status(StatusCodes.Success.Ok).json({
+      message: SuccessMessages.UserFound,
+      success: true,
+      userData,
+    });
+  } catch (error) {
+    console.error("Error in getting user by id", error);
+    return res.status(StatusCodes.ServerError.InternalServerError).json({
+      message: ErrorMessages.SomethingWentWrong,
+      success: false,
+    });
+  }
+};
+
+// Get all user
+export const getAllUsers = async (req: Request, res: Response) => {
+  try {
+    const { searchQuery } = req.query;
+    const loggedInUserId = (req as any).user.userId;
+    let filter: any = { _id: { $ne: loggedInUserId } };
+
+    if (searchQuery) {
+      filter.$or = [
+        { fullName: { $regex: searchQuery, $options: "i" } },
+        { email: { $regex: searchQuery, $options: "i" } },
+      ];
+      const searchNumber = Number(searchQuery);
+      if (!isNaN(searchNumber)) {
+        filter.$or.push({ mobileNumber: searchNumber });
+      }
+    }
+
+    const users = await User.find(filter);
+    if (!users) {
+      return res.json({
+        message: ErrorMessages.UserNotFound,
+        success: false,
+        status: StatusCodes.ClientError.NotFound,
+      });
+    }
+
+    const userData = users.map((user: IUser) => ({
+      _id: user._id,
+      fullName: user.fullName,
+      email: user.email,
+      mobileNumber:
+        user.mobileNumber !== undefined ? user.mobileNumber.toString() : "null",
+      profileImg: user.profileImg || "null",
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    }));
+
+    const totalCount = users.length;
+
+    return res.json({
+      message: SuccessMessages.UserFound,
+      status: StatusCodes.Success.Ok,
+      success: true,
+      totalCount,
+      userData,
+    });
+  } catch (error) {
+    console.error("Error in getting users", error);
+    return res.json({
+      message: ErrorMessages.SomethingWentWrong,
+      status: StatusCodes.ServerError.InternalServerError,
+      success: false,
+    });
+  }
+};
+
+// logout user
+export const logout = async (req: Request, res: Response) => {
+  try {
+    const user_id = req.params.id;
+    const user_mongoose_id = new mongoose.Types.ObjectId(user_id);
+    await User.findByIdAndUpdate(
+      { _id: user_id },
+      { $set: { userLogin: false } }
+    );
+
+    await UserFCM.deleteMany({
+      user_id: user_mongoose_id,
+    });
+    const user_soket_id = await getUserSocketId(user_id);
+    await sendOfflineEvent(user_id, user_soket_id);
+    await removeToken(user_id);
+    return res.json({
+      message: SuccessMessages.Logout,
+      status: StatusCodes.Success.Ok,
+      success: true,
+    });
+  } catch (error) {
+    console.error("Error in logout users", error);
+    return res.json({
+      message: ErrorMessages.SomethingWentWrong,
+      status: StatusCodes.ServerError.InternalServerError,
+      success: false,
+    });
+  }
+};
 
 // Forget password
 export const forgetPassword = async (req: Request, res: Response) => {
@@ -264,19 +410,18 @@ export const resetPassword = async (req: Request, res: Response) => {
 };
 
 // Change password for user and admin
-export const changePassword = async (req: CustomRequest, res: Response) => {
+export const changePassword = async (req: Request, res: Response) => {
   try {
     const { oldPassword, newPassword, confirmPassword } = req.body;
-    const tokenuser = req.user as userType;
-    if (!tokenuser) {
+    const id = req.params.id;
+    if (!id) {
       return res.json({
-        message: ErrorMessages.UserNotFound,
+        message: ErrorMessages.IdNotFound,
         success: false,
         status: StatusCodes.ClientError.NotFound,
       });
     }
-    const userId = tokenuser.userId;
-    const findUser = await User.findById({ _id: userId });
+    const findUser = await User.findById({ _id: id });
     if (findUser) {
       const requiredFields = ["oldPassword", "newPassword", "confirmPassword"];
       const missingFields = requiredFields.filter((field) => !req.body[field]);
@@ -344,17 +489,16 @@ export const changePassword = async (req: CustomRequest, res: Response) => {
 };
 
 // update user profile
-export const updateUserProfile = async (req: CustomRequest, res: Response) => {
+export const updateUserProfile = async (req: Request, res: Response) => {
   try {
-    const tokenuser = req.user as userType;
-    if (!tokenuser) {
+    const id = req.params.id;
+    if (!id) {
       return res.json({
-        message: ErrorMessages.UserNotFound,
+        message: ErrorMessages.IdNotFound,
         success: false,
         status: StatusCodes.ClientError.NotFound,
       });
     }
-    const userId = tokenuser.userId;
     const { fullName, mobileNumber, address } = req.body;
     const file = req.file;
 
@@ -379,7 +523,7 @@ export const updateUserProfile = async (req: CustomRequest, res: Response) => {
     if (mobileNumber) updateData.mobileNumber = mobileNumber;
     if (address) updateData.address = address;
 
-    const updatedUser = await User.findByIdAndUpdate(userId, updateData, {
+    const updatedUser = await User.findByIdAndUpdate({ _id: id }, updateData, {
       new: true,
     });
     if (updatedUser) {
@@ -406,17 +550,16 @@ export const updateUserProfile = async (req: CustomRequest, res: Response) => {
   }
 };
 
+// Update user in db
 export const updateUserDataInDatabase = async (user_id: any, changes: any) => {
   try {
     const findUser = await User.findOneAndUpdate({ _id: user_id }, changes);
-    // console.log("findUserfindUserfindUser", findUser);
     if (findUser) {
       return true;
     } else {
       return false;
     }
   } catch (err) {
-    // console.log("updateUserDataInDatabaseerrrr---->", err);
     return false;
   }
 };

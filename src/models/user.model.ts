@@ -6,13 +6,7 @@ export interface IUser extends Document {
   password: string;
   mobileNumber: number;
   profileImg: string;
-  address: string;
-  IsAdmin: boolean;
-  role: Schema.Types.ObjectId;
-  stripeUserId: string;
   userLogin: boolean;
-  provider: string;
-  uid: string;
   createdAt: Date;
   updatedAt: Date;
 }
