@@ -140,7 +140,7 @@ export const userLogin = async (req: Request, res: Response) => {
 
     const token = jwt.sign(
       {
-        userId: updatedAuth?._id,
+        id: updatedAuth?._id,
         fullName: updatedAuth?.fullName,
         email: updatedAuth?.email,
         userLogin: updatedAuth?.userLogin,
@@ -182,7 +182,7 @@ export const getUserById = async (req: Request, res: Response) => {
       fullName: foundedUser.fullName,
       email: foundedUser.email,
       mobileNumber: foundedUser.mobileNumber || "null",
-      // profileImg: foundedUser.profileImg || "null",
+      profileImg: foundedUser.profileImg || "null",
       createdAt: foundedUser.createdAt,
       updatedAt: foundedUser.updatedAt,
     };
@@ -204,7 +204,7 @@ export const getUserById = async (req: Request, res: Response) => {
 export const getAllUsers = async (req: Request, res: Response) => {
   try {
     const { searchQuery } = req.query;
-    const loggedInUserId = (req as any).user.userId;
+    const loggedInUserId = (req as any).user.id;
     let filter: any = { _id: { $ne: loggedInUserId } };
 
     if (searchQuery) {

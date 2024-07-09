@@ -13,6 +13,7 @@ import { updateUserDataInDatabase } from "../controller/user.controller";
 dotenv.config();
 
 export const jwtSecret = process.env.Jwt_Secret || "defaultSecreteKey";
+
 export const storeUserSocketId = async (
   userId: string,
   socketId: string
@@ -27,19 +28,25 @@ export const getUserSocketId = async (
 };
 
 export const authorizeJWT = async (token: string) => {
-  const authHeader = token;
-  if (authHeader) {
-    const token = authHeader;
+  if (!token) {
+    return {
+      status: false,
+      message: "Token missing!",
+    };
+  }
+
+  try {
     const decoded: any = jwt.verify(token, jwtSecret);
-    if (decoded?.id) {
+    if (decoded && decoded.id) {
       return decoded;
     } else {
       return null;
     }
-  } else {
+  } catch (error) {
+    Logger.error("Invalid token:", error);
     return {
       status: false,
-      message: "Token missing!",
+      message: "Invalid token!",
     };
   }
 };
@@ -163,6 +170,8 @@ export function initializeWebSocket(server: http.Server) {
                 ? existingChat?.requestStatus
                 : "pending",
             });
+            // console.log("chatJoined");
+            // console.log("datadata", data);
 
             if (data?.isNotification) {
               const messages = await getLatestmessages(chatId, 20, user?.id);
@@ -305,6 +314,9 @@ export function initializeWebSocket(server: http.Server) {
         changeSuggessionStatus?: boolean;
       }) => {
         try {
+          // console.log("sendPrivateMessage");
+          // console.log("datadata", data);
+
           if (data?.sender_id && data?.receiver_id) {
             const new_user_id = new mongoose.Types.ObjectId(data?.sender_id);
             const ChatId = new mongoose.Types.ObjectId(data.conversation_id);
@@ -374,10 +386,13 @@ export function initializeWebSocket(server: http.Server) {
                   changeSuggessionStatus: data?.changeSuggessionStatus,
                 });
                 // console.log("sendPrivateMessage1111111");
+                // console.log("GetPrivateMessage");
+                // console.log("datadata", data);
                 if (data?.isFirstMsg && data?.receiver_id) {
                   io.to(user_scoket_id).emit("NewUserMsg");
                 }
-
+                // console.log("NewUserMsg");
+                // console.log("datadata", data);
                 if (
                   data.isQuestion &&
                   // data.nextQuestion &&

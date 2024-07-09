@@ -22,8 +22,8 @@ export const auth: RequestHandler = async (
       return res.status(401).json({ message: "No Token Found" });
     }
     const decoded: any = jwt.verify(token, jwtSecret);
-    if (decoded && decoded?.userId) {
-      const redisToken = await redisClient.get(`user_${decoded.userId}`);
+    if (decoded && decoded?.id) {
+      const redisToken = await redisClient.get(`user_${decoded.id}`);
       if (token === redisToken) {
         (req as CustomRequest).user = decoded;
         next();
