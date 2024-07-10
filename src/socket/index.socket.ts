@@ -40,6 +40,7 @@ export const authorizeJWT = async (token: string) => {
   }
 };
 let io: any;
+
 export function initializeWebSocket(server: http.Server) {
   io = new socket.Server(server, {
     cors: {
@@ -47,6 +48,8 @@ export function initializeWebSocket(server: http.Server) {
       methods: ["GET", "POST"],
     },
   });
+
+  // Socket connection
   io.on("connection", async (socket: any) => {
     const token = socket?.handshake?.query?.token;
     try {
@@ -76,10 +79,13 @@ export function initializeWebSocket(server: http.Server) {
     } catch (error) {
       socket.disconnect(true);
     }
+
+    // Socket is connected
     socket.emit("connected", {
       test: "hi socket is connected",
     });
 
+    //Check user is online
     socket.on(
       "onlineStatus",
       async (data: { token: string; online_status: Boolean }) => {
@@ -96,6 +102,7 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
+    // Join the room with user
     socket.on(
       "joinRoom",
       async (data: {
@@ -124,6 +131,8 @@ export function initializeWebSocket(server: http.Server) {
             }
             const roomName = `chat-${chatId}`;
             socket.join(roomName);
+
+            // Confirm user is joined the chat with user
             io.to(roomName).emit("chatJoined", {
               message: "Please Save this chat id if you want!",
               conversation_id: chatId,
@@ -132,6 +141,8 @@ export function initializeWebSocket(server: http.Server) {
             });
             if (data?.isNotification) {
               const messages = await getLatestmessages(chatId, 20, user?.id);
+
+              // Seen the previous room messages
               socket.emit("previousMsg", {
                 messages: messages,
                 conversation_id: chatId,
@@ -152,6 +163,7 @@ export function initializeWebSocket(server: http.Server) {
             if (update_all_messages) {
               const user_socket_id = await getUserSocketId(data?.targetUserId);
               if (user_socket_id) {
+                // See the user all messages in a room
                 io.to(user_socket_id).emit("allMessageSee", {
                   conversation_id: chatId,
                   other_user_id: data?.targetUserId,
@@ -167,6 +179,7 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
+    // Left the chat event
     socket.on("leaveChat", async (data: { userId: string; chatId: string }) => {
       redisClient.set(
         `userStatus:${data?.userId}`,
@@ -176,6 +189,7 @@ export function initializeWebSocket(server: http.Server) {
       await redisClient.del(`socketUserMap:${socket.id}`);
     });
 
+    // Block the user
     socket.on(
       "blockUser",
       async (data: {
@@ -185,6 +199,8 @@ export function initializeWebSocket(server: http.Server) {
       }) => {
         if (data?.conversation_id) {
           const Other_user_scoket_id = await getUserSocketId(data.otherUserId);
+
+          // Confirm the user is blocked
           socket.to(Other_user_scoket_id).emit("GotBlocked", {
             conversation_id: data.conversation_id,
             user_id: data.user_id,
@@ -193,6 +209,7 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
+    // Unblock the user
     socket.on(
       "UnblockUser",
       async (data: {
@@ -202,6 +219,8 @@ export function initializeWebSocket(server: http.Server) {
       }) => {
         if (data?.conversation_id) {
           const Other_user_scoket_id = await getUserSocketId(data.otherUserId);
+
+          // Confirm the user is unblocked
           socket.to(Other_user_scoket_id).emit("GotUnBlocked", {
             conversation_id: data.conversation_id,
             user_id: data.user_id,
@@ -210,6 +229,7 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
+    // Sending the private message to user in a joined room
     socket.on(
       "sendPrivateMessage",
       async (data: {
@@ -281,13 +301,17 @@ export function initializeWebSocket(server: http.Server) {
                 recipientStatusData.currentChat != data.conversation_id &&
                 recipientStatusData.online
               ) {
+                // user is online but not viewing the current chat
                 messageData.message_state = "delivered";
               } else if (recipientStatusData.online) {
+                // user is online and viewing the current chat
                 messageData.message_state = "seen";
               } else {
+                // user is offline
                 messageData.message_state = "sent";
               }
             } else {
+              // user is offline
               messageData.message_state = "sent";
             }
 
@@ -295,7 +319,7 @@ export function initializeWebSocket(server: http.Server) {
             const newMessage = new Message(messageData);
             const savedMessage = await newMessage.save();
 
-            // Emit the message to the room
+            // Emit and get the latest message to the room
             const roomName = `chat-${data.conversation_id}`;
             io.to(roomName).emit("GetPrivateMessage", {
               ...messageData,
@@ -350,6 +374,7 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
+    // Reading the all message of the user in a room
     socket.on(
       "readAllMessages",
       async (data: { token: string; conversation_id: string }) => {
@@ -371,6 +396,7 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
+    // Checking user is typing the message in a room
     socket.on(
       "startTyping",
       async (data: { token: string; conversation_id: string }) => {
@@ -379,6 +405,8 @@ export function initializeWebSocket(server: http.Server) {
           if (user) {
             const userId = user.id;
             const roomName = `chat-${data.conversation_id}`;
+
+            // Emit and confirm the user is start the typing
             io.to(roomName).emit("typingStart", {
               userId: userId,
               conversation_id: data.conversation_id,
@@ -393,6 +421,7 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
+    // Checking user is stop typing the message in a room
     socket.on(
       "stopTyping",
       async (data: { token: string; conversation_id: string }) => {
@@ -401,6 +430,8 @@ export function initializeWebSocket(server: http.Server) {
           if (user) {
             const userId = user.id;
             const roomName = `chat-${data.conversation_id}`;
+
+            // Emit and confirm the user is stop the typing
             io.to(roomName).emit("typingStop", {
               userId: userId,
               conversation_id: data.conversation_id,
@@ -415,6 +446,7 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
+    // Socket connection is disconnected
     socket.on("disconnect", async () => {
       const userId = await redisClient.get(`socketUserMap:${socket?.id}`);
       if (userId) {
