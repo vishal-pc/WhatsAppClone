@@ -2,7 +2,6 @@ import mongoose, { Document, Schema } from "mongoose";
 
 export interface IChat extends Document {
   participants: any;
-  requestStatus: string;
   initiator: Schema.Types.ObjectId;
   responder: Schema.Types.ObjectId;
   isSuggestionActive: boolean;
@@ -11,9 +10,8 @@ export interface IChat extends Document {
 
 const chatSchema: Schema<IChat> = new mongoose.Schema({
   participants: [Schema.Types.ObjectId],
-  requestStatus: { type: String, default: "pending" },
-  initiator: { type: Schema.Types.ObjectId },
-  responder: { type: Schema.Types.ObjectId },
+  initiator: { type: Schema.Types.ObjectId, ref: "User" },
+  responder: { type: Schema.Types.ObjectId, ref: "User" },
   isSuggestionActive: {
     type: Boolean,
     default: true,

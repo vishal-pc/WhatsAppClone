@@ -1,8 +1,8 @@
 import mongoose, { Document, Schema } from "mongoose";
 
 export interface IMessage extends Document {
-  sender: string;
-  receiver_id: string;
+  sender_id: Schema.Types.ObjectId;
+  receiver_id: Schema.Types.ObjectId;
   message: string;
   message_state: "sent" | "delivered" | "seen";
   timestamp: Date;
@@ -10,48 +10,45 @@ export interface IMessage extends Document {
   mediaUrl: string;
   isReply: boolean;
   toWhichReplied: any;
-  conversationId: Schema.Types.ObjectId;
+  conversation_id: Schema.Types.ObjectId;
   reaction: any;
   message_id: string;
 }
 
 const messageSchema: Schema<IMessage> = new mongoose.Schema({
-  sender: Schema.Types.ObjectId,
-  receiver_id: Schema.Types.ObjectId,
-  message: String,
-  message_state: {
-    type: String,
-    default: "sent",
+  sender_id: {
+    type: Schema.Types.ObjectId,
+    ref: "User",
+    required: false,
   },
-  isReply: {
-    type: Boolean,
-    default: false,
+  receiver_id: {
+    type: Schema.Types.ObjectId,
+    ref: "User",
+    required: false,
   },
-  message_id: {
-    type: String, //This id is to show single tick on frontend as the users does not get any id when a message is send from his side
-  },
+  message: { type: String, required: true },
+  message_state: { type: String, default: "sent" },
+  isReply: { type: Boolean, default: false },
+  message_id: { type: String },
   toWhichReplied: {
-    message_type: {
-      type: String,
-    },
-    message: {
-      type: String,
-    },
-    messageOwner: Schema.Types.ObjectId,
+    message_type: { type: String },
+    message: { type: String },
+    messageOwner: { type: Schema.Types.ObjectId },
   },
   reaction: [
     {
-      user_id: Schema.Types.ObjectId,
-      reaction: String,
+      user_id: { type: Schema.Types.ObjectId, required: true, ref: "User" },
+      reaction: { type: String },
     },
   ],
-  timestamp: {
-    type: Date,
-    default: Date.now,
+  timestamp: { type: Date, default: Date.now },
+  message_type: { type: String },
+  mediaUrl: { type: String },
+  conversation_id: {
+    type: Schema.Types.ObjectId,
+    ref: "Chat",
+    required: false,
   },
-  message_type: String,
-  mediaUrl: String,
-  conversationId: Schema.Types.ObjectId,
 });
 
 const Message = mongoose.model<IMessage>("Message", messageSchema);
