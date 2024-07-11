@@ -2,7 +2,7 @@ version: "3"
 services:
   redis:
     image: redis
-    restart: unless-stopped
+    restart: always
     network_mode: bridge
     expose:
       - 6379
@@ -13,7 +13,7 @@ services:
     build:
       context: .
       dockerfile: ./Dockerfile
-    restart: unless-stopped
+    restart: always
     network_mode: bridge
     env_file:
       - .env
