@@ -2,7 +2,6 @@ import express from "express";
 import multer from "multer";
 import { auth } from "../middleware/token/authMiddleware";
 import * as userController from "../controller/user.controller";
-import * as chatController from "../controller/chat.controller";
 
 const authRouter = express.Router();
 
@@ -32,7 +31,5 @@ authRouter.patch(
   upload.single("profileImg"),
   userController.updateUserProfile
 );
-// authRouter.post("/chats", [auth], chatController.MakeChat);
-// authRouter.post("/delete-user-chats", [auth], chatController.DeleteChats);
 
 export default authRouter;

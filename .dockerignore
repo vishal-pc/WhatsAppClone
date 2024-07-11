@@ -1,0 +1,6 @@
+# dependencies
+**/node_modules/
+logs/*
+dist/
+dist
+redis_data/

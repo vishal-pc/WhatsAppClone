@@ -7,7 +7,6 @@ import redisClient from "../helper/radis/index.redis";
 import dotenv from "dotenv";
 import Message from "../models/message.model";
 import Chat from "../models/chat.model";
-import UserFCM from "../models/userfcm.model";
 import { updateUserDataInDatabase } from "../controller/user.controller";
 dotenv.config();
 
@@ -140,7 +139,7 @@ export function initializeWebSocket(server: http.Server) {
               isSuggestionActive: existingChat?.isSuggestionActive,
             });
             if (data?.isNotification) {
-              const messages = await getLatestmessages(chatId, 20, user?.id);
+              const messages = await getLatestmessages(chatId, user?.id);
 
               // Seen the previous room messages
               socket.emit("previousMsg", {
@@ -239,16 +238,10 @@ export function initializeWebSocket(server: http.Server) {
         message: string;
         conversation_id: string;
         isFirstMsg: boolean;
-        message_type?: string;
-        mediaUrl?: boolean;
         isReply?: boolean;
-        message_id?: boolean;
-        isQuestion?: boolean;
-        nextQuestion?: string;
+        message_id?: string;
         currentQuestionId?: string;
-        user_name: string;
         toWhichReplied?: {
-          message_type?: string;
           message?: string;
           messageOwner?: string;
         };
@@ -272,14 +265,11 @@ export function initializeWebSocket(server: http.Server) {
               receiver_id: receiver_Object_id,
               message: data?.message,
               conversation_id: ChatId,
-              message_type: data?.message_type,
-              mediaUrl: data?.mediaUrl,
               isReply: data?.isReply || false,
               message_id: data?.message_id,
               message_state: "",
               toWhichReplied: data?.toWhichReplied?.message
                 ? {
-                    message_type: data?.toWhichReplied?.message_type,
                     message: data?.toWhichReplied?.message,
                     messageOwner: data?.toWhichReplied?.messageOwner
                       ? new mongoose.Types.ObjectId(
@@ -332,23 +322,6 @@ export function initializeWebSocket(server: http.Server) {
               io.to(user_socket_id).emit("newUserMsg");
             }
 
-            // Send FCM notification if receiver has a token
-            const receiverDetails = await UserFCM.findOne({
-              user_id: data?.receiver_id,
-            });
-            if (receiverDetails?.fcm_token) {
-              await sendLatednumberMessage(
-                data.conversation_id,
-                20,
-                receiverDetails?.fcm_token,
-                data?.user_name,
-                data?.message,
-                data.sender_id,
-                data?.user_name,
-                "chat"
-              );
-            }
-
             // Update chat if it is the first message
             if (data?.isFirstMsg && data?.receiver_id) {
               await Chat.findOneAndUpdate(
@@ -374,18 +347,20 @@ export function initializeWebSocket(server: http.Server) {
       }
     );
 
-    // Reading the all message of the user in a room
+    // Get user previous all message in a room
     socket.on(
-      "readAllMessages",
-      async (data: { token: string; conversation_id: string }) => {
+      "getPreviousMessages",
+      async (data: { last_message_id: string; conversation_id: string }) => {
         try {
-          const user = await authorizeJWT(data?.token);
-          if (user) {
-            const userId = user?.id;
-            const roomName = `chat-${data?.conversation_id}`;
-            io.to(roomName).emit("messageRead", {
-              userId: userId,
+          const messages = await fetchPreviousMessages(
+            data?.conversation_id,
+            data?.last_message_id
+          );
+          if (messages) {
+            // Emit a typing event to the room
+            socket.emit("recievePreviousMessages", {
               conversation_id: data.conversation_id,
+              messages,
             });
           } else {
             Logger.error("Unauthorized Access");
@@ -435,7 +410,7 @@ export function initializeWebSocket(server: http.Server) {
             io.to(roomName).emit("typingStop", {
               userId: userId,
               conversation_id: data.conversation_id,
-              typing: true,
+              typing: false,
             });
           } else {
             Logger.error("Unauthorized Access");
@@ -445,6 +420,70 @@ export function initializeWebSocket(server: http.Server) {
         }
       }
     );
+
+    // Update message
+    socket.on("updateMessage", async (data: any) => {
+      try {
+        const { messageId, newMessage, sender_id } = data;
+        if (!messageId || !newMessage || !sender_id) {
+          return socket.emit("error", { message: "Invalid input" });
+        }
+        const message = await Message.findOne({
+          _id: messageId,
+          $or: [{ sender_id: sender_id }],
+        });
+
+        if (!message) {
+          return socket.emit("error", {
+            message: "Message not found or unauthorized",
+          });
+        }
+        message.message = newMessage;
+        const updatedMessage = await message.save();
+
+        const roomName = `chat-${message.conversation_id}`;
+        io.to(roomName).emit("messageUpdated", {
+          messageId: updatedMessage._id,
+          newMessage: updatedMessage.message,
+          conversationId: updatedMessage.conversation_id,
+        });
+      } catch (error) {
+        console.error("Error updating message:", error);
+        socket.emit("error", { message: "Error updating message" });
+      }
+    });
+
+    // Delete user message
+    socket.on("deleteMessages", async (data: any) => {
+      try {
+        const { messageIds, conversationId, sender_id } = data;
+
+        if (!Array.isArray(messageIds) || messageIds.length === 0) {
+          return socket.emit("error", {
+            message: "No messages selected for deletion",
+          });
+        }
+
+        const messages = await Message.find({
+          _id: { $in: messageIds },
+          $or: [{ sender_id: sender_id }],
+        });
+
+        if (messages.length !== messageIds.length) {
+          return socket.emit("error", {
+            message: "Some messages not found or unauthorized",
+          });
+        }
+
+        await Message.deleteMany({ _id: { $in: messageIds } });
+
+        const roomName = `chat-${conversationId}`;
+        io.to(roomName).emit("messagesDeleted", { messageIds, conversationId });
+      } catch (error) {
+        console.error("Error deleting messages:", error);
+        socket.emit("error", { message: "Error deleting messages" });
+      }
+    });
 
     // Socket connection is disconnected
     socket.on("disconnect", async () => {
@@ -463,7 +502,7 @@ export function initializeWebSocket(server: http.Server) {
 
 const getLatestmessages = async (
   conversation_id: string,
-  limit: number,
+  // limit: number,
   user_id: string
 ) => {
   const chat = await Chat.findOne({
@@ -486,7 +525,7 @@ const getLatestmessages = async (
     query["timestamp"] = { $gt: deletedAt };
   }
   const messages = await Message.find(query)
-    .limit(limit)
+    // .limit(limit)
     .sort({ timestamp: -1 });
 
   return messages;
@@ -512,38 +551,6 @@ const updateMessageStatus = async (
   } catch (error) {
     console.error("Error updating message status:", error);
   }
-};
-
-const sendLatednumberMessage = async (
-  conversation_id: string,
-  limit: number,
-  user_fcm: string,
-  user_name: string | undefined,
-  message: string | undefined,
-  sender_id: string,
-  title: string,
-  type?: string
-) => {
-  const userchatAndMessage: any = await Chat.findById(conversation_id).lean(
-    true
-  );
-  userchatAndMessage.user_name = user_name;
-  userchatAndMessage.sender_id = sender_id;
-
-  let notificationData = {
-    title: title ? title : "New Message",
-    body:
-      message && message?.length >= 75
-        ? message?.slice(0, 75) + "..."
-        : message && message?.length < 75
-        ? message
-        : "New Message",
-    userFcmToken: user_fcm,
-    data: {
-      type: type,
-      message_details: JSON.stringify(userchatAndMessage),
-    },
-  };
 };
 
 const sendOnlineEvent: any = async (userId: string) => {
@@ -605,3 +612,22 @@ export const sendOfflineEvent: any = async (
     return "Error to send user is offline";
   }
 };
+
+export async function fetchPreviousMessages(
+  conversationId: string,
+  lastMessageId: string
+) {
+  try {
+    const messages = await Message.find({
+      conversationId: conversationId,
+      _id: { $lt: lastMessageId },
+    })
+      .sort({ _id: -1 })
+      .limit(20);
+
+    return messages;
+  } catch (error) {
+    console.error("Failed to fetch messages:", error);
+    throw error;
+  }
+}

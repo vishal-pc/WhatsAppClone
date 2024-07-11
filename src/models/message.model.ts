@@ -6,8 +6,6 @@ export interface IMessage extends Document {
   message: string;
   message_state: "sent" | "delivered" | "seen";
   timestamp: Date;
-  message_type: string;
-  mediaUrl: string;
   isReply: boolean;
   toWhichReplied: any;
   conversation_id: Schema.Types.ObjectId;
@@ -42,8 +40,6 @@ const messageSchema: Schema<IMessage> = new mongoose.Schema({
     },
   ],
   timestamp: { type: Date, default: Date.now },
-  message_type: { type: String },
-  mediaUrl: { type: String },
   conversation_id: {
     type: Schema.Types.ObjectId,
     ref: "Chat",

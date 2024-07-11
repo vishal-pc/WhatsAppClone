@@ -17,7 +17,6 @@ import { sendMailForPassword } from "../template/forgetPassMail";
 import cloudinary from "../middleware/cloudflare/cloudinary";
 import redisClient from "../helper/radis/index.redis";
 import mongoose from "mongoose";
-import UserFCM from "../models/userfcm.model";
 import { getUserSocketId, sendOfflineEvent } from "../socket/index.socket";
 
 async function removeToken(userId: string) {
@@ -266,10 +265,6 @@ export const logout = async (req: Request, res: Response) => {
       { _id: user_id },
       { $set: { userLogin: false } }
     );
-
-    await UserFCM.deleteMany({
-      user_id: user_mongoose_id,
-    });
     const user_soket_id = await getUserSocketId(user_id);
     await sendOfflineEvent(user_id, user_soket_id);
     await removeToken(user_id);
