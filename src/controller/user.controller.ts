@@ -15,12 +15,22 @@ import {
 import { transporter } from "../middleware/mail/transPorter";
 import { sendMailForPassword } from "../template/forgetPassMail";
 import cloudinary from "../middleware/cloudflare/cloudinary";
-import redisClient from "../helper/radis/index.redis";
+import redisClient from "../middleware/radis/index.redis";
 import mongoose from "mongoose";
-import { getUserSocketId, sendOfflineEvent } from "../socket/index.socket";
+import {
+  deleteUserStatusFromRedis,
+  getUserSocketId,
+} from "../socket/index.socket";
+import UserFCM from "../models/userfcm.model";
 
+// Function to remove the user token from redis
 async function removeToken(userId: string) {
   await redisClient.del(`user_${userId}`);
+}
+
+// Function to remove the user status from redis
+async function deleteStatusFromRedis(userId: string) {
+  await redisClient.del(`userStatus:${userId}`);
 }
 
 const otpStore: any = {};
@@ -261,23 +271,31 @@ export const logout = async (req: Request, res: Response) => {
   try {
     const user_id = req.params.id;
     const user_mongoose_id = new mongoose.Types.ObjectId(user_id);
-    await User.findByIdAndUpdate(
-      { _id: user_id },
-      { $set: { userLogin: false } }
-    );
-    const user_soket_id = await getUserSocketId(user_id);
-    await sendOfflineEvent(user_id, user_soket_id);
+
+    // Update userLogin status in MongoDB
+    await User.findByIdAndUpdate(user_mongoose_id, {
+      $set: { userLogin: false },
+    });
+
+    // Get user's socket ID and send offline event
+    const user_socket_id = await getUserSocketId(user_id);
+    await deleteUserStatusFromRedis(user_id, user_socket_id);
+
+    // Remove user's token from Redis
     await removeToken(user_id);
+    // Remove userStatus from Redis
+    await deleteStatusFromRedis(user_id);
+
     return res.json({
-      message: SuccessMessages.Logout,
-      status: StatusCodes.Success.Ok,
+      message: "User logged out successfully",
+      status: 200,
       success: true,
     });
   } catch (error) {
-    console.error("Error in logout users", error);
-    return res.json({
-      message: ErrorMessages.SomethingWentWrong,
-      status: StatusCodes.ServerError.InternalServerError,
+    console.error("Error logging out user", error);
+    return res.status(500).json({
+      message: "Failed to logout user",
+      status: 500,
       success: false,
     });
   }
@@ -556,5 +574,60 @@ export const updateUserDataInDatabase = async (user_id: any, changes: any) => {
     }
   } catch (err) {
     return false;
+  }
+};
+
+// Save User Fcm token in db
+export const SaveUserFcm = async (req: any, res: Response) => {
+  try {
+    const userId = req?.user?.id;
+    const data = req?.body;
+    const user_id = new mongoose.Types.ObjectId(userId);
+    const user_fcm = data.fcm;
+    const device_id = data.device_id;
+
+    // Delete existing FCM tokens for this user
+    await UserFCM.deleteMany({ user_id: user_id });
+
+    // Find and update the FCM token for the given device_id
+    const findUserFCM = await UserFCM.findOneAndUpdate(
+      { device_id: device_id },
+      {
+        user_id: user_id,
+        fcm_token: user_fcm,
+      }
+    );
+
+    if (findUserFCM) {
+      return res.status(200).send({
+        status: true,
+        message: "FCM saved successfully",
+      });
+    } else {
+      // Create a new FCM token entry
+      const userFCM = new UserFCM({
+        user_id: user_id,
+        fcm_token: user_fcm,
+        device_id: device_id,
+      });
+      const saveUserFCM = await userFCM.save();
+      if (saveUserFCM) {
+        return res.status(200).send({
+          status: true,
+          message: "FCM saved successfully",
+        });
+      } else {
+        return res.status(500).send({
+          status: false,
+          message: "Failed to save FCM",
+        });
+      }
+    }
+  } catch (err) {
+    console.error("SaveUserFcm Err---->", err);
+    return res.status(500).send({
+      status: false,
+      message: "Something went wrong, please try later",
+    });
   }
 };

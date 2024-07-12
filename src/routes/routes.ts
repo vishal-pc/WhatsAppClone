@@ -31,5 +31,6 @@ authRouter.patch(
   upload.single("profileImg"),
   userController.updateUserProfile
 );
+authRouter.post("/save_user_fcm", [auth], userController.SaveUserFcm);
 
 export default authRouter;

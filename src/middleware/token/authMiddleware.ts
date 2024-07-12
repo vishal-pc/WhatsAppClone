@@ -1,6 +1,6 @@
 import jwt, { JwtPayload } from "jsonwebtoken";
 import { Request, Response, NextFunction, RequestHandler } from "express";
-import redisClient from "../../helper/radis/index.redis";
+import redisClient from "../radis/index.redis";
 import dotenv from "dotenv";
 dotenv.config();
 

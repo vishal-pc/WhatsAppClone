@@ -3,24 +3,32 @@ import socket from "socket.io";
 import Logger from "../utils/logger";
 import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
-import redisClient from "../helper/radis/index.redis";
+import redisClient from "../middleware/radis/index.redis";
 import dotenv from "dotenv";
 import Message from "../models/message.model";
 import Chat from "../models/chat.model";
 import { updateUserDataInDatabase } from "../controller/user.controller";
+import { addFcmJob } from "../middleware/Queues/pushQueue";
+import UserFCM from "../models/userfcm.model";
+import { RedisKey } from "ioredis";
 dotenv.config();
 
+// Store the user socket id
 export const storeUserSocketId = async (
   userId: string,
   socketId: string
 ): Promise<void> => {
   await redisClient.set(`socketId:${userId}`, socketId);
 };
+
+// Get the store user socket id
 export const getUserSocketId = async (
   userId: string
 ): Promise<string | null> => {
   return await redisClient.get(`socketId:${userId}`);
 };
+
+// Authorize the user token
 export const authorizeJWT = async (token: string) => {
   const authHeader = token;
   if (authHeader) {
@@ -38,7 +46,76 @@ export const authorizeJWT = async (token: string) => {
     };
   }
 };
+
+// Get all the user is online
+export async function getOnlineUsers(): Promise<
+  { userId: string; online: boolean }[]
+> {
+  return new Promise((resolve, reject) => {
+    redisClient.keys("userStatus:*", (err, keys) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      if (!keys || keys.length === 0) {
+        resolve([]);
+        return;
+      }
+
+      redisClient.mget(keys as RedisKey[], async (err, statuses: any) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        // Parse and filter online users
+        const onlineUsers: { userId: string; online: boolean }[] = [];
+
+        for (let i = 0; i < statuses.length; i++) {
+          const status = statuses[i];
+          if (status) {
+            const userId = keys[i].split(":")[1];
+            const userStatus = JSON.parse(status);
+            const token = await redisClient.get(`user_${userId}`);
+            if (userStatus.online && token) {
+              onlineUsers.push({
+                userId: userId,
+                online: true,
+              });
+            }
+          }
+        }
+
+        resolve(onlineUsers);
+      });
+    });
+  });
+}
+
+// Delete userStatus from Redis on user disconnect
+export const deleteUserStatusFromRedis = async (
+  userId: string,
+  socket_id?: any
+) => {
+  try {
+    if (socket_id) {
+      await redisClient.set(
+        `userStatus:${userId}`,
+        JSON.stringify({ currentChat: null, online: false })
+      );
+    }
+    await redisClient.del(`userStatus:${userId}`);
+    await redisClient.del(`socketUserMap:${socket_id}`);
+    console.log(`Deleted userStatus from Redis for userId: ${userId}`);
+  } catch (error) {
+    console.error("Error deleting userStatus from Redis:", error);
+  }
+};
+
 let io: any;
+
+// ---------------------------- Socket connection is start ----------------------------
 
 export function initializeWebSocket(server: http.Server) {
   io = new socket.Server(server, {
@@ -72,8 +149,20 @@ export function initializeWebSocket(server: http.Server) {
           `userStatus:${user?.id}`,
           JSON.stringify({ currentChat: null, online: true })
         );
-        await redisClient.set(`socketUserMap:${socket.id}`, user?.id);
-        await sendOnlineEvent(user?.id);
+        // Notify all clients that a new user has connected
+        io.emit("userConnected", {
+          userId: user?.id,
+          socketId: socket.id,
+        });
+
+        // Send list of currently online users to the newly connected user
+        const onlineUsers = await getOnlineUsers();
+        socket.emit("currentOnlineUsers", onlineUsers);
+
+        console.log("user is online", user?.id, socket.id);
+
+        // await redisClient.set(`socketUserMap:${socket.id}`, user?.id);
+        // await sendOnlineEvent(user?.id, socket.id);
       }
     } catch (error) {
       socket.disconnect(true);
@@ -87,7 +176,13 @@ export function initializeWebSocket(server: http.Server) {
     //Check user is online
     socket.on(
       "onlineStatus",
-      async (data: { token: string; online_status: Boolean }) => {
+      async (data: {
+        token: string;
+        chatId: string;
+        senderId: string;
+        receiverId: string;
+        online_status: Boolean;
+      }) => {
         const user = await authorizeJWT(data.token);
         if (user) {
           const user_id = user?.id;
@@ -95,6 +190,7 @@ export function initializeWebSocket(server: http.Server) {
           const upUserLoc = await updateUserDataInDatabase(user_id, {
             isOnline: Onlinestatus,
           });
+          return upUserLoc;
         } else {
           Logger.error("Unauthorized Access");
         }
@@ -239,8 +335,8 @@ export function initializeWebSocket(server: http.Server) {
         conversation_id: string;
         isFirstMsg: boolean;
         isReply?: boolean;
-        message_id?: string;
-        currentQuestionId?: string;
+        message_id?: boolean;
+        user_name: string;
         toWhichReplied?: {
           message?: string;
           messageOwner?: string;
@@ -251,92 +347,286 @@ export function initializeWebSocket(server: http.Server) {
           if (data?.sender_id && data?.receiver_id) {
             const new_user_id = new mongoose.Types.ObjectId(data?.sender_id);
             const ChatId = new mongoose.Types.ObjectId(data.conversation_id);
-            const user_socket_id = await getUserSocketId(data?.receiver_id);
+            const user_scoket_id = await getUserSocketId(data?.receiver_id);
             const receiver_Object_id = new mongoose.Types.ObjectId(
               data?.receiver_id
             );
-            const recipientStatus = await redisClient.get(
+            const recipientStatus: any = await redisClient.get(
               `userStatus:${data?.receiver_id}`
             );
 
-            // Create the message data
-            const messageData = {
-              sender_id: new_user_id,
-              receiver_id: receiver_Object_id,
-              message: data?.message,
-              conversation_id: ChatId,
-              isReply: data?.isReply || false,
-              message_id: data?.message_id,
-              message_state: "",
-              toWhichReplied: data?.toWhichReplied?.message
-                ? {
-                    message: data?.toWhichReplied?.message,
-                    messageOwner: data?.toWhichReplied?.messageOwner
-                      ? new mongoose.Types.ObjectId(
-                          data?.toWhichReplied?.messageOwner
-                        )
-                      : null,
-                  }
-                : {},
-              reaction: [
-                { user_id: new_user_id },
-                { user_id: receiver_Object_id },
-              ],
-            };
-
-            // Determine message state based on recipient status
             if (recipientStatus) {
               const recipientStatusData = JSON.parse(recipientStatus);
+              // If user is online and is not on the user chat screen i.e he is in the app
               if (
                 recipientStatusData.currentChat != data.conversation_id &&
                 recipientStatusData.online
               ) {
-                // user is online but not viewing the current chat
-                messageData.message_state = "delivered";
-              } else if (recipientStatusData.online) {
-                // user is online and viewing the current chat
-                messageData.message_state = "seen";
-              } else {
-                // user is offline
-                messageData.message_state = "sent";
+                const newMessage = new Message({
+                  sender_id: new_user_id,
+                  receiver_id: receiver_Object_id,
+                  message: data?.message,
+                  conversation_id: data?.conversation_id,
+                  isReply: data?.isReply ? data?.isReply : false,
+                  message_id: data?.message_id,
+                  message_state: "delivered",
+                  toWhichReplied: data?.toWhichReplied?.message
+                    ? {
+                        message: data?.toWhichReplied?.message,
+                        messageOwner: data?.toWhichReplied?.messageOwner
+                          ? new mongoose.Types.ObjectId(
+                              data?.toWhichReplied?.messageOwner
+                            )
+                          : "",
+                      }
+                    : {},
+                  reaction: [
+                    { user_id: new_user_id },
+                    { user_id: data?.receiver_id },
+                  ],
+                });
+                const savedMessage = await newMessage.save();
+                const roomName = `chat-${data.conversation_id}`;
+                io.to(roomName).emit("GetPrivateMessage", {
+                  sender_id: data?.sender_id,
+                  receiver_id: data?.receiver_id,
+                  message: data?.message,
+                  timestamp: savedMessage?.timestamp,
+                  _id: savedMessage?._id,
+                  conversation_id: data?.conversation_id,
+                  reaction: savedMessage?.reaction,
+                  message_state: "delivered",
+                  isReply: data?.isReply ? data?.isReply : false,
+                  message_id: data?.message_id,
+                  toWhichReplied: data?.toWhichReplied
+                    ? data?.toWhichReplied
+                    : false,
+                  changeSuggessionStatus: data?.changeSuggessionStatus,
+                });
+                if (data?.isFirstMsg && data?.receiver_id) {
+                  io.to(user_scoket_id).emit("NewUserMsg");
+                }
+                const recieverDetails: any = await UserFCM.findOne({
+                  user_id: data?.receiver_id,
+                });
+                if (recieverDetails?.fcm_token) {
+                  let userchatAndMessage: any = await sendLatednumberMessage(
+                    data.conversation_id,
+                    recieverDetails?.fcm_token,
+                    data?.user_name,
+                    data?.message,
+                    data.sender_id,
+                    data?.user_name,
+                    "chat"
+                  );
+                  return userchatAndMessage;
+                } else {
+                  console.error("user FCM not registered");
+                }
+              }
+              // If user is online and is on the user chat screen
+              else if (recipientStatusData.online) {
+                const newMessage = new Message({
+                  sender_id: new_user_id,
+                  receiver_id: receiver_Object_id,
+                  message: data?.message,
+                  conversation_id: data?.conversation_id,
+                  isReply: data?.isReply ? data?.isReply : false,
+                  message_id: data?.message_id,
+                  message_state: "seen",
+                  toWhichReplied: data?.toWhichReplied?.message
+                    ? {
+                        message: data?.toWhichReplied?.message,
+                        messageOwner: data?.toWhichReplied?.messageOwner
+                          ? new mongoose.Types.ObjectId(
+                              data?.toWhichReplied?.messageOwner
+                            )
+                          : "",
+                      }
+                    : {},
+                  reaction: [
+                    { user_id: new_user_id },
+                    { user_id: data?.receiver_id },
+                  ],
+                });
+                const savedMessage = await newMessage.save();
+                const roomName = `chat-${data.conversation_id}`;
+                io.to(roomName).emit("GetPrivateMessage", {
+                  sender_id: data?.sender_id,
+                  receiver_id: data?.receiver_id,
+                  message: data?.message,
+                  timestamp: savedMessage?.timestamp,
+                  _id: savedMessage?._id,
+                  conversation_id: data?.conversation_id,
+                  reaction: savedMessage?.reaction,
+                  message_state: "seen",
+                  isReply: data?.isReply ? data?.isReply : false,
+                  message_id: data?.message_id,
+                  toWhichReplied: data?.toWhichReplied
+                    ? data?.toWhichReplied
+                    : false,
+                  changeSuggessionStatus: data?.changeSuggessionStatus,
+                });
+              }
+              // If user is offline and is not in the app
+              else {
+                const newMessage = new Message({
+                  sender_id: new_user_id,
+                  receiver_id: receiver_Object_id,
+                  message: data?.message,
+                  conversation_id: data?.conversation_id,
+                  message_state: "sent",
+                  isReply: data?.isReply ? data?.isReply : false,
+                  message_id: data?.message_id,
+                  toWhichReplied: data?.toWhichReplied?.message
+                    ? {
+                        message: data?.toWhichReplied?.message,
+                        messageOwner: data?.toWhichReplied?.messageOwner
+                          ? new mongoose.Types.ObjectId(
+                              data?.toWhichReplied?.messageOwner
+                            )
+                          : "",
+                      }
+                    : {},
+                  reaction: [
+                    { user_id: new_user_id },
+                    { user_id: data?.receiver_id },
+                  ],
+                });
+                const savedMessage = await newMessage.save();
+                const roomName = `chat-${data.conversation_id}`;
+                io.to(roomName).emit("GetPrivateMessage", {
+                  sender_id: data?.sender_id,
+                  receiver_id: data?.receiver_id,
+                  message: data?.message,
+                  timestamp: savedMessage?.timestamp,
+                  _id: savedMessage?._id,
+                  conversation_id: data?.conversation_id,
+                  message_state: "sent",
+                  reaction: savedMessage?.reaction,
+                  isReply: data?.isReply ? data?.isReply : false,
+                  message_id: data?.message_id,
+                  toWhichReplied: data?.toWhichReplied
+                    ? data?.toWhichReplied
+                    : false,
+                  changeSuggessionStatus: data?.changeSuggessionStatus,
+                });
+                if (data?.isFirstMsg && data?.receiver_id) {
+                  const user_scoket_id = await getUserSocketId(
+                    data?.receiver_id
+                  );
+                  io.to(user_scoket_id).emit("NewUserMsg");
+                }
+
+                const recieverDetails: any = await UserFCM.findOne({
+                  user_id: data?.receiver_id,
+                });
+                if (recieverDetails?.fcm_token) {
+                  let userchatAndMessage: any = await sendLatednumberMessage(
+                    data.conversation_id,
+                    recieverDetails?.fcm_token,
+                    data?.user_name,
+                    data?.message,
+                    data.sender_id,
+                    data?.user_name,
+                    "chat"
+                  );
+                  return userchatAndMessage;
+                } else {
+                  console.error("user FCM not registered");
+                }
               }
             } else {
-              // user is offline
-              messageData.message_state = "sent";
+              /**
+               * In any other case when we do not have user status then we consider him as offline
+               * and app is closed for that case just send notification to the user
+               */
+              const newMessage = new Message({
+                sender_id: new_user_id,
+                receiver_id: receiver_Object_id,
+                message: data?.message,
+                conversation_id: data?.conversation_id,
+                message_state: "sent",
+                isReply: data?.isReply ? data?.isReply : false,
+                message_id: data?.message_id,
+                toWhichReplied: data?.toWhichReplied?.message
+                  ? {
+                      message: data?.toWhichReplied?.message,
+                      messageOwner: data?.toWhichReplied?.messageOwner
+                        ? new mongoose.Types.ObjectId(
+                            data?.toWhichReplied?.messageOwner
+                          )
+                        : "",
+                    }
+                  : {},
+                reaction: [
+                  { user_id: new_user_id },
+                  { user_id: data?.receiver_id },
+                ],
+              });
+              const savedMessage = await newMessage.save();
+              const roomName = `chat-${data.conversation_id}`;
+              io.to(roomName).emit("GetPrivateMessage", {
+                sender_id: data?.sender_id,
+                receiver_id: data?.receiver_id,
+                message: data?.message,
+                timestamp: savedMessage?.timestamp,
+                _id: savedMessage?._id,
+                conversation_id: data?.conversation_id,
+                message_state: "sent",
+                reaction: savedMessage?.reaction,
+                isReply: data?.isReply ? data?.isReply : false,
+                message_id: data?.message_id,
+                toWhichReplied: data?.toWhichReplied
+                  ? data?.toWhichReplied
+                  : false,
+                changeSuggessionStatus: data?.changeSuggessionStatus,
+              });
+              const recieverDetails: any = await UserFCM.findOne({
+                user_id: data?.receiver_id,
+              });
+              if (recieverDetails?.fcm_token) {
+                let userchatAndMessage: any = await sendLatednumberMessage(
+                  data.conversation_id,
+                  recieverDetails?.fcm_token,
+                  data?.user_name,
+                  data?.message,
+                  data.sender_id,
+                  data?.user_name,
+                  "chat"
+                );
+                console.log(
+                  "notification send to user",
+                  sendLatednumberMessage
+                );
+              } else {
+                console.log("user FCM not registered");
+                console.error("user FCM not registered");
+              }
             }
-
-            // Save the message to the database
-            const newMessage = new Message(messageData);
-            const savedMessage = await newMessage.save();
-
-            // Emit and get the latest message to the room
-            const roomName = `chat-${data.conversation_id}`;
-            io.to(roomName).emit("GetPrivateMessage", {
-              ...messageData,
-              timestamp: savedMessage?.timestamp,
-              _id: savedMessage?._id,
-            });
-
-            // Emit newUserMsg if it is the first message
             if (data?.isFirstMsg && data?.receiver_id) {
-              io.to(user_socket_id).emit("newUserMsg");
-            }
-
-            // Update chat if it is the first message
-            if (data?.isFirstMsg && data?.receiver_id) {
-              await Chat.findOneAndUpdate(
-                { _id: ChatId },
-                { initiator: data.sender_id, responder: data.receiver_id }
+              const updatechat = await Chat.findOneAndUpdate(
+                {
+                  _id: new mongoose.Types.ObjectId(data.conversation_id),
+                },
+                {
+                  initiator: data.sender_id,
+                  responder: data.receiver_id,
+                }
               );
-              io.to(user_socket_id).emit("newUserMsg");
+              const user_scoket_id = await getUserSocketId(data?.receiver_id);
+              io.to(user_scoket_id).emit("NewUserMsg");
             }
-
-            // Update suggestion status if needed
             if (data?.changeSuggessionStatus) {
-              await Chat.updateOne(
-                { _id: ChatId },
-                { isSuggestionActive: false }
+              const update = await Chat.updateOne(
+                {
+                  _id: ChatId,
+                },
+                {
+                  isSuggestionActive: false,
+                }
               );
+              return update;
             }
           } else {
             Logger.error("Unauthorized Access");
@@ -493,18 +783,20 @@ export function initializeWebSocket(server: http.Server) {
           `userStatus:${userId}`,
           JSON.stringify({ currentChat: null, online: false })
         );
-        await redisClient.del(`socketUserMap:${socket.id}`);
-        await sendOfflineEvent(userId, socket.id);
+        // await redisClient.del(`socketUserMap:${socket.id}`, userId);
+        // await sendOfflineEvent(userId, socket.id);
+        // // console.log("user is offline", userId, socket.id);
+        await deleteUserStatusFromRedis(userId);
+        io.emit("userDisconnected", userId);
       }
     });
   });
 }
 
-const getLatestmessages = async (
-  conversation_id: string,
-  // limit: number,
-  user_id: string
-) => {
+// ---------------------------- Socket connection is end ----------------------------
+
+// Get latest messages function
+const getLatestmessages = async (conversation_id: string, user_id: string) => {
   const chat = await Chat.findOne({
     _id: conversation_id,
     "IsChatDeleted.userId": new mongoose.Types.ObjectId(user_id),
@@ -524,13 +816,12 @@ const getLatestmessages = async (
   if (deletedAt) {
     query["timestamp"] = { $gt: deletedAt };
   }
-  const messages = await Message.find(query)
-    // .limit(limit)
-    .sort({ timestamp: -1 });
+  const messages = await Message.find(query).sort({ timestamp: -1 });
 
   return messages;
 };
 
+// Updating the message status
 const updateMessageStatus = async (
   receiverId: string,
   newStatus: string,
@@ -542,7 +833,7 @@ const updateMessageStatus = async (
     const result = await Message.updateMany(
       {
         receiver_id: receiver_id,
-        message_state: { $in: ["sent", "delivered"] },
+        message_state: { $in: ["sent", "delivered", "seen"] },
         conversationId: chatIdNew,
       },
       { $set: { message_state: newStatus } }
@@ -553,66 +844,79 @@ const updateMessageStatus = async (
   }
 };
 
-const sendOnlineEvent: any = async (userId: string) => {
-  try {
-    const userMongooseId = new mongoose.Types.ObjectId(userId);
-    const chats: any = await Chat.find({
-      participants: { $in: [userMongooseId] },
-    });
-    if (chats.length) {
-      chats?.map(async (chatObj: any) => {
-        const receiver_id = chatObj?.participants?.filter(
-          (ele: any) => ele != userId
-        )?.[0] as string;
-        const otherParticipantSocketId = await getUserSocketId(receiver_id);
-        io.to(otherParticipantSocketId).emit("userOnline", {
-          chatId: chatObj._id,
-        });
-      });
-    }
-    const upUserLoc = await updateUserDataInDatabase(userMongooseId, {
-      isOnline: true,
-    });
-  } catch (err) {
-    return "Error to send user is online";
-  }
-};
+// // Sending logged in user to reciver user is online
+// const sendOnlineEvent: any = async (userId: string, socket_id?: string) => {
+//   try {
+//     const userMongooseId = new mongoose.Types.ObjectId(userId);
+//     const chats: any = await Chat.find({
+//       participants: { $in: [userMongooseId] },
+//     });
+//     if (chats.length) {
+//       chats?.map(async (chatObj: any) => {
+//         const receiver_id = chatObj?.participants?.filter(
+//           (ele: any) => ele != userId
+//         )?.[0] as string;
+//         const otherParticipantSocketId = await getUserSocketId(receiver_id);
+//         io.to(otherParticipantSocketId).emit("userOnline", {
+//           chatId: chatObj._id,
+//           userId: userId,
+//         });
+//       });
+//     }
+//     if (socket_id) {
+//       await redisClient.set(
+//         `userStatus:${userId}`,
+//         JSON.stringify({ currentChat: null, online: true })
+//       );
+//       await redisClient.set(`socketUserMap:${socket_id}`, userId);
+//     }
 
-export const sendOfflineEvent: any = async (
-  userId: string,
-  socket_id?: string
-) => {
-  try {
-    const userMongooseId = new mongoose.Types.ObjectId(userId);
-    const chats: any = await Chat.find({
-      participants: { $in: [userMongooseId] },
-    });
-    if (chats.length) {
-      chats?.map(async (chatObj: any) => {
-        const receiver_id = chatObj?.participants?.filter(
-          (ele: any) => ele != userId
-        )?.[0] as string;
-        const otherParticipantSocketId = await getUserSocketId(receiver_id);
-        io.to(otherParticipantSocketId).emit("userOffline", {
-          chatId: chatObj._id,
-        });
-      });
-    }
-    if (socket_id) {
-      await redisClient.set(
-        `userStatus:${userId}`,
-        JSON.stringify({ currentChat: null, online: false })
-      );
-      await redisClient.del(`socketUserMap:${socket_id}`);
-    }
-    const upUserLoc = await updateUserDataInDatabase(userMongooseId, {
-      isOnline: false,
-    });
-  } catch (err) {
-    return "Error to send user is offline";
-  }
-};
+//     const upUserLoc = await updateUserDataInDatabase(userMongooseId, {
+//       isOnline: true,
+//     });
+//   } catch (err) {
+//     return "Error to send user is online";
+//   }
+// };
 
+// Sending logged in user to reciver user is offline
+// export const sendOfflineEvent: any = async (
+//   userId: string,
+//   socket_id?: string
+// ) => {
+//   try {
+//     const userMongooseId = new mongoose.Types.ObjectId(userId);
+//     const chats: any = await Chat.find({
+//       participants: { $in: [userMongooseId] },
+//     });
+//     if (chats.length) {
+//       chats?.map(async (chatObj: any) => {
+//         const receiver_id = chatObj?.participants?.filter(
+//           (ele: any) => ele != userId
+//         )?.[0] as string;
+//         const otherParticipantSocketId = await getUserSocketId(receiver_id);
+//         io.to(otherParticipantSocketId).emit("userOffline", {
+//           chatId: chatObj._id,
+//           userId: userId,
+//         });
+//       });
+//     }
+//     if (socket_id) {
+//       await redisClient.set(
+//         `userStatus:${userId}`,
+//         JSON.stringify({ currentChat: null, online: false })
+//       );
+//       await redisClient.del(`socketUserMap:${socket_id}`);
+//     }
+//     const upUserLoc = await updateUserDataInDatabase(userMongooseId, {
+//       isOnline: false,
+//     });
+//   } catch (err) {
+//     return "Error to send user is offline";
+//   }
+// };
+
+// Get the previous user message
 export async function fetchPreviousMessages(
   conversationId: string,
   lastMessageId: string
@@ -631,3 +935,38 @@ export async function fetchPreviousMessages(
     throw error;
   }
 }
+
+// Sending the lated message notification to user
+const sendLatednumberMessage = async (
+  conversation_id: string,
+  user_fcm: string,
+  user_name: string | undefined,
+  message: string | undefined,
+  sender_id: string,
+  title: string,
+  type?: string
+) => {
+  const userchatAndMessage: any = await Chat.findById(conversation_id).lean(
+    true
+  );
+  userchatAndMessage.user_name = user_name;
+  userchatAndMessage.sender_id = sender_id;
+
+  let notificationData = {
+    title: title ? title : "New Message",
+    body:
+      message && message?.length >= 75
+        ? message?.slice(0, 75) + "..."
+        : message && message?.length < 75
+        ? message
+        : "New Message",
+    userFcmToken: user_fcm,
+    data: {
+      type: type,
+      message_details: JSON.stringify(userchatAndMessage),
+    },
+  };
+  addFcmJob(notificationData).then(() => {});
+};
+
+// Get all user is online
