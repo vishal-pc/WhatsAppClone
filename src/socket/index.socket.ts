@@ -1,123 +1,32 @@
 import http from "http";
 import socket from "socket.io";
 import Logger from "../utils/logger";
-import jwt from "jsonwebtoken";
 import mongoose from "mongoose";
 import redisClient from "../middleware/radis/index.redis";
-import dotenv from "dotenv";
 import Message from "../models/message.model";
 import Chat from "../models/chat.model";
 import { updateUserDataInDatabase } from "../controller/user.controller";
-import { addFcmJob } from "../middleware/Queues/pushQueue";
 import UserFCM from "../models/userfcm.model";
-import { RedisKey } from "ioredis";
+import {
+  authorizeJWT,
+  deleteUserStatusFromRedis,
+  fetchPreviousMessages,
+  getLatestmessages,
+  getOnlineUsers,
+  getUserSocketId,
+  sendLatednumberMessage,
+  storeUserSocketId,
+  updateMessageStatus,
+} from "../helper/socket.helper";
+import dotenv from "dotenv";
+
 dotenv.config();
-
-// Store the user socket id
-export const storeUserSocketId = async (
-  userId: string,
-  socketId: string
-): Promise<void> => {
-  await redisClient.set(`socketId:${userId}`, socketId);
-};
-
-// Get the store user socket id
-export const getUserSocketId = async (
-  userId: string
-): Promise<string | null> => {
-  return await redisClient.get(`socketId:${userId}`);
-};
-
-// Authorize the user token
-export const authorizeJWT = async (token: string) => {
-  const authHeader = token;
-  if (authHeader) {
-    const token = authHeader;
-    const decoded: any = jwt.verify(token, `${process.env.Jwt_Secret}`);
-    if (decoded?.id) {
-      return decoded;
-    } else {
-      return "Token is wrong";
-    }
-  } else {
-    return {
-      status: false,
-      message: "Token missing!",
-    };
-  }
-};
-
-// Get all the user is online
-export async function getOnlineUsers(): Promise<
-  { userId: string; online: boolean }[]
-> {
-  return new Promise((resolve, reject) => {
-    redisClient.keys("userStatus:*", (err, keys) => {
-      if (err) {
-        reject(err);
-        return;
-      }
-
-      if (!keys || keys.length === 0) {
-        resolve([]);
-        return;
-      }
-
-      redisClient.mget(keys as RedisKey[], async (err, statuses: any) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-
-        // Parse and filter online users
-        const onlineUsers: { userId: string; online: boolean }[] = [];
-
-        for (let i = 0; i < statuses.length; i++) {
-          const status = statuses[i];
-          if (status) {
-            const userId = keys[i].split(":")[1];
-            const userStatus = JSON.parse(status);
-            const token = await redisClient.get(`user_${userId}`);
-            if (userStatus.online && token) {
-              onlineUsers.push({
-                userId: userId,
-                online: true,
-              });
-            }
-          }
-        }
-
-        resolve(onlineUsers);
-      });
-    });
-  });
-}
-
-// Delete userStatus from Redis on user disconnect
-export const deleteUserStatusFromRedis = async (
-  userId: string,
-  socket_id?: any
-) => {
-  try {
-    if (socket_id) {
-      await redisClient.set(
-        `userStatus:${userId}`,
-        JSON.stringify({ currentChat: null, online: false })
-      );
-    }
-    await redisClient.del(`userStatus:${userId}`);
-    await redisClient.del(`socketUserMap:${socket_id}`);
-    console.log(`Deleted userStatus from Redis for userId: ${userId}`);
-  } catch (error) {
-    console.error("Error deleting userStatus from Redis:", error);
-  }
-};
 
 let io: any;
 
 // ---------------------------- Socket connection is start ----------------------------
 
-export function initializeWebSocket(server: http.Server) {
+export const initializeWebSocket = (server: http.Server) => {
   io = new socket.Server(server, {
     cors: {
       origin: "*",
@@ -158,11 +67,6 @@ export function initializeWebSocket(server: http.Server) {
         // Send list of currently online users to the newly connected user
         const onlineUsers = await getOnlineUsers();
         socket.emit("currentOnlineUsers", onlineUsers);
-
-        console.log("user is online", user?.id, socket.id);
-
-        // await redisClient.set(`socketUserMap:${socket.id}`, user?.id);
-        // await sendOnlineEvent(user?.id, socket.id);
       }
     } catch (error) {
       socket.disconnect(true);
@@ -215,6 +119,7 @@ export function initializeWebSocket(server: http.Server) {
             const participants = [new_user_id, other_user_id].sort();
             const existingChat = await Chat.findOne({ participants });
             let chatId: any;
+
             if (!existingChat) {
               const newChat = new Chat({
                 participants,
@@ -226,6 +131,7 @@ export function initializeWebSocket(server: http.Server) {
             }
             const roomName = `chat-${chatId}`;
             socket.join(roomName);
+            console.log(`User ${data.targetUserId} joining room ${roomName}`);
 
             // Confirm user is joined the chat with user
             io.to(roomName).emit("chatJoined", {
@@ -242,27 +148,33 @@ export function initializeWebSocket(server: http.Server) {
                 messages: messages,
                 conversation_id: chatId,
               });
+              // Update message status to 'seen'
+              await updateMessageStatus(user?.id, "seen", chatId);
             }
+
             await redisClient.set(`socketUserMap:${socket.id}`, user?.id);
             await redisClient.set(
               `userStatus:${user?.id}`,
               JSON.stringify({ currentChat: chatId, online: true })
             );
+
             if (existingChat?.isSuggestionActive) {
-            }
-            const update_all_messages = await updateMessageStatus(
-              user?.id,
-              "seen",
-              chatId
-            );
-            if (update_all_messages) {
-              const user_socket_id = await getUserSocketId(data?.targetUserId);
-              if (user_socket_id) {
-                // See the user all messages in a room
-                io.to(user_socket_id).emit("allMessageSee", {
-                  conversation_id: chatId,
-                  other_user_id: data?.targetUserId,
-                });
+              const update_all_messages = await updateMessageStatus(
+                user?.id,
+                "seen",
+                chatId
+              );
+              if (update_all_messages) {
+                const user_socket_id = await getUserSocketId(
+                  data?.targetUserId
+                );
+                if (user_socket_id) {
+                  // See the user all messages in a room
+                  io.to(user_socket_id).emit("allMessageSee", {
+                    conversation_id: chatId,
+                    other_user_id: data?.targetUserId,
+                  });
+                }
               }
             }
           } else {
@@ -783,190 +695,12 @@ export function initializeWebSocket(server: http.Server) {
           `userStatus:${userId}`,
           JSON.stringify({ currentChat: null, online: false })
         );
-        // await redisClient.del(`socketUserMap:${socket.id}`, userId);
-        // await sendOfflineEvent(userId, socket.id);
-        // // console.log("user is offline", userId, socket.id);
         await deleteUserStatusFromRedis(userId);
         io.emit("userDisconnected", userId);
       }
     });
   });
-}
+};
 
+export { io };
 // ---------------------------- Socket connection is end ----------------------------
-
-// Get latest messages function
-const getLatestmessages = async (conversation_id: string, user_id: string) => {
-  const chat = await Chat.findOne({
-    _id: conversation_id,
-    "IsChatDeleted.userId": new mongoose.Types.ObjectId(user_id),
-  });
-  let deletedAt = null;
-  if (chat) {
-    const deletionRecord = chat.IsChatDeleted.find((deletion: any) =>
-      deletion.userId.equals(user_id)
-    );
-    if (deletionRecord) {
-      deletedAt = deletionRecord.deletedAt;
-    }
-  }
-  const query: any = {
-    conversation_id: conversation_id,
-  };
-  if (deletedAt) {
-    query["timestamp"] = { $gt: deletedAt };
-  }
-  const messages = await Message.find(query).sort({ timestamp: -1 });
-
-  return messages;
-};
-
-// Updating the message status
-const updateMessageStatus = async (
-  receiverId: string,
-  newStatus: string,
-  chatId: string
-) => {
-  try {
-    const receiver_id = new mongoose.Types.ObjectId(receiverId);
-    const chatIdNew = new mongoose.Types.ObjectId(chatId);
-    const result = await Message.updateMany(
-      {
-        receiver_id: receiver_id,
-        message_state: { $in: ["sent", "delivered", "seen"] },
-        conversationId: chatIdNew,
-      },
-      { $set: { message_state: newStatus } }
-    );
-    return true;
-  } catch (error) {
-    console.error("Error updating message status:", error);
-  }
-};
-
-// // Sending logged in user to reciver user is online
-// const sendOnlineEvent: any = async (userId: string, socket_id?: string) => {
-//   try {
-//     const userMongooseId = new mongoose.Types.ObjectId(userId);
-//     const chats: any = await Chat.find({
-//       participants: { $in: [userMongooseId] },
-//     });
-//     if (chats.length) {
-//       chats?.map(async (chatObj: any) => {
-//         const receiver_id = chatObj?.participants?.filter(
-//           (ele: any) => ele != userId
-//         )?.[0] as string;
-//         const otherParticipantSocketId = await getUserSocketId(receiver_id);
-//         io.to(otherParticipantSocketId).emit("userOnline", {
-//           chatId: chatObj._id,
-//           userId: userId,
-//         });
-//       });
-//     }
-//     if (socket_id) {
-//       await redisClient.set(
-//         `userStatus:${userId}`,
-//         JSON.stringify({ currentChat: null, online: true })
-//       );
-//       await redisClient.set(`socketUserMap:${socket_id}`, userId);
-//     }
-
-//     const upUserLoc = await updateUserDataInDatabase(userMongooseId, {
-//       isOnline: true,
-//     });
-//   } catch (err) {
-//     return "Error to send user is online";
-//   }
-// };
-
-// Sending logged in user to reciver user is offline
-// export const sendOfflineEvent: any = async (
-//   userId: string,
-//   socket_id?: string
-// ) => {
-//   try {
-//     const userMongooseId = new mongoose.Types.ObjectId(userId);
-//     const chats: any = await Chat.find({
-//       participants: { $in: [userMongooseId] },
-//     });
-//     if (chats.length) {
-//       chats?.map(async (chatObj: any) => {
-//         const receiver_id = chatObj?.participants?.filter(
-//           (ele: any) => ele != userId
-//         )?.[0] as string;
-//         const otherParticipantSocketId = await getUserSocketId(receiver_id);
-//         io.to(otherParticipantSocketId).emit("userOffline", {
-//           chatId: chatObj._id,
-//           userId: userId,
-//         });
-//       });
-//     }
-//     if (socket_id) {
-//       await redisClient.set(
-//         `userStatus:${userId}`,
-//         JSON.stringify({ currentChat: null, online: false })
-//       );
-//       await redisClient.del(`socketUserMap:${socket_id}`);
-//     }
-//     const upUserLoc = await updateUserDataInDatabase(userMongooseId, {
-//       isOnline: false,
-//     });
-//   } catch (err) {
-//     return "Error to send user is offline";
-//   }
-// };
-
-// Get the previous user message
-export async function fetchPreviousMessages(
-  conversationId: string,
-  lastMessageId: string
-) {
-  try {
-    const messages = await Message.find({
-      conversationId: conversationId,
-      _id: { $lt: lastMessageId },
-    })
-      .sort({ _id: -1 })
-      .limit(20);
-
-    return messages;
-  } catch (error) {
-    console.error("Failed to fetch messages:", error);
-    throw error;
-  }
-}
-
-// Sending the lated message notification to user
-const sendLatednumberMessage = async (
-  conversation_id: string,
-  user_fcm: string,
-  user_name: string | undefined,
-  message: string | undefined,
-  sender_id: string,
-  title: string,
-  type?: string
-) => {
-  const userchatAndMessage: any = await Chat.findById(conversation_id).lean(
-    true
-  );
-  userchatAndMessage.user_name = user_name;
-  userchatAndMessage.sender_id = sender_id;
-
-  let notificationData = {
-    title: title ? title : "New Message",
-    body:
-      message && message?.length >= 75
-        ? message?.slice(0, 75) + "..."
-        : message && message?.length < 75
-        ? message
-        : "New Message",
-    userFcmToken: user_fcm,
-    data: {
-      type: type,
-      message_details: JSON.stringify(userchatAndMessage),
-    },
-  };
-  addFcmJob(notificationData).then(() => {});
-};
-
-// Get all user is online

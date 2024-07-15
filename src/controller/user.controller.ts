@@ -17,11 +17,13 @@ import { sendMailForPassword } from "../template/forgetPassMail";
 import cloudinary from "../middleware/cloudflare/cloudinary";
 import redisClient from "../middleware/radis/index.redis";
 import mongoose from "mongoose";
+import UserFCM from "../models/userfcm.model";
 import {
   deleteUserStatusFromRedis,
+  getOnlineUsers,
   getUserSocketId,
-} from "../socket/index.socket";
-import UserFCM from "../models/userfcm.model";
+} from "../helper/socket.helper";
+import { io } from "../socket/index.socket";
 
 // Function to remove the user token from redis
 async function removeToken(userId: string) {
@@ -158,6 +160,13 @@ export const userLogin = async (req: Request, res: Response) => {
       { expiresIn: process.env.Jwt_Expiry_Hours }
     );
     await redisClient.set(`user_${updatedAuth?._id}`, token);
+
+    // Emit currentOnlineUsers event
+    if (io) {
+      const onlineUsers = await getOnlineUsers();
+      io.emit("currentOnlineUsers", onlineUsers);
+    }
+
     return res.json({
       message: SuccessMessages.SignInSuccess,
       status: StatusCodes.Success.Ok,
@@ -279,8 +288,16 @@ export const logout = async (req: Request, res: Response) => {
 
     // Get user's socket ID and send offline event
     const user_socket_id = await getUserSocketId(user_id);
-    await deleteUserStatusFromRedis(user_id, user_socket_id);
-
+    if (user_socket_id) {
+      // Emit the userDisconnected event
+      io.emit("userDisconnected", user_id);
+      // Remove user status from Redis
+      await redisClient.set(
+        `userStatus:${user_id}`,
+        JSON.stringify({ currentChat: null, online: false })
+      );
+      await deleteUserStatusFromRedis(user_id);
+    }
     // Remove user's token from Redis
     await removeToken(user_id);
     // Remove userStatus from Redis
