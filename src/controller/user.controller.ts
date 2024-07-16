@@ -18,12 +18,12 @@ import cloudinary from "../middleware/cloudflare/cloudinary";
 import redisClient from "../middleware/radis/index.redis";
 import mongoose from "mongoose";
 import UserFCM from "../models/userfcm.model";
-import {
+import Chat from "../models/chat.model";
+import io, {
   deleteUserStatusFromRedis,
   getOnlineUsers,
   getUserSocketId,
-} from "../helper/socket.helper";
-import { io } from "../socket/index.socket";
+} from "../socket/index.socket";
 
 // Function to remove the user token from redis
 async function removeToken(userId: string) {
@@ -195,6 +195,11 @@ export const getUserById = async (req: Request, res: Response) => {
         success: false,
       });
     }
+
+    // Find all chats where the user is a participant
+    const chats = await Chat.find({ participants: id });
+    const chatIds = chats.map((chat) => ({ conversation_id: chat._id }));
+
     const userData = {
       _id: foundedUser.id,
       fullName: foundedUser.fullName,
@@ -203,6 +208,7 @@ export const getUserById = async (req: Request, res: Response) => {
       profileImg: foundedUser.profileImg || "null",
       createdAt: foundedUser.createdAt,
       updatedAt: foundedUser.updatedAt,
+      chatIds,
     };
     return res.status(StatusCodes.Success.Ok).json({
       message: SuccessMessages.UserFound,
@@ -288,16 +294,8 @@ export const logout = async (req: Request, res: Response) => {
 
     // Get user's socket ID and send offline event
     const user_socket_id = await getUserSocketId(user_id);
-    if (user_socket_id) {
-      // Emit the userDisconnected event
-      io.emit("userDisconnected", user_id);
-      // Remove user status from Redis
-      await redisClient.set(
-        `userStatus:${user_id}`,
-        JSON.stringify({ currentChat: null, online: false })
-      );
-      await deleteUserStatusFromRedis(user_id);
-    }
+    await deleteUserStatusFromRedis(user_id, user_socket_id);
+
     // Remove user's token from Redis
     await removeToken(user_id);
     // Remove userStatus from Redis
